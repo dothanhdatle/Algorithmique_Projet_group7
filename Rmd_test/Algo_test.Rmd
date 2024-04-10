@@ -1,0 +1,207 @@
+---
+output: html_document
+---
+
+
+# Algorithmique Projet: SMO and SGD algorithm in SVM classification - M2DS
+### Do Thanh Dat LE, Piseth KHENG
+#### Evry University, Paris-Saclay University
+### April 10, 2024
+
+
+## Testing Algorithms
+
+```{r}
+library(SVMalgo)
+library(microbenchmark)
+library(ggplot2)
+```
+
+We simulate a linearly separable data set. The input data was random uniform m-dimensional vectors. A m-dimensional weight vector was generated randomly in [-10,10]. If the dot product of the weight with an input point is greater than 0, then a positive label 1 is assigned to the input point. If the dot product is less than 0, then a negative label -1 is assigned.
+
+```{r}
+linearly_separable_data <- function(n_samples, n_features, noise = 0) {
+  # Generate random coefficients for the linear equation
+  coefficients <- runif(n_features, -10, 10)
+  
+  # Generate random data points
+  X <- matrix(runif(n_samples * n_features, -10, 10), ncol = n_features)
+  
+  # Compute the target variable (labels) based on the linear equation
+  y <- ifelse(X %*% coefficients > 0, 1, -1)
+  
+  # Add noise if specified
+  if (noise > 0) {
+    y <- y * rnorm(length(y), mean = 1, sd = noise)
+  }
+  
+  # Return the data
+  return(list(X = X, y = y))
+}
+
+# Example usage:
+set.seed(123)  # for reproducibility
+data <- linearly_separable_data(n_samples = 100, n_features = 2, noise = 0)
+
+# Plot the data
+plot(data$X, col = ifelse(data$y > 0, "blue", "red"), pch = 19, xlab = "Feature 1", ylab = "Feature 2")
+legend("topright", legend = c("Class 1", "Class -1"), col = c("blue", "red"), pch = 19)
+```
+
+We define a function `one.simu` to simplify the simulation study for time complexity.
+
+```{r}
+one.simu <- function(n, num_features = 10, type = "sample", func = "svm_smo")
+{
+  set.seed(123)
+  if(type == "sample"){data <- linearly_separable_data(n, num_features)}
+  if(func == "svm_smo"){t <- system.time(svm_smo(data$X, data$y, C = 1, tol = 1e-3, max_passes = 1, kernel_fun = linear_kernel))[[1]]}
+  if(func == "svm_sgd"){t <- system.time(svm_sgd(data$X, data$y, epochs = 100, C = 1, learning_rate = 1e-2, tolerance = 1e-3))[[1]]}
+  if(func == "svm_smo_Rcpp"){t <- system.time(svm_smo_Rcpp(data$X, data$y, C = 1, tol = 1e-3, max_passes = 1))[[1]]}
+  if(func == "svm_sgd_Rcpp"){t <- system.time(svm_sgd_Rcpp(data$X, data$y, epochs = 100, C = 1, learning_rate = 1e-2, tolerance = 1e-3))[[1]]}
+  return(t)
+}
+```
+
+First, we evaluate the running time of the algorithms on the simulated data with the size of 1000 observations and only 2 features (the simplest case).
+
+```{r}
+n <- 1000
+```
+
+and we get:
+
+```{r}
+one.simu(n, num_features = 2, func = "svm_smo")
+one.simu(n, num_features = 2, func = "svm_sgd")
+one.simu(n, num_features = 2, func = "svm_smo_Rcpp")
+one.simu(n, num_features = 2, func = "svm_sgd_Rcpp")
+```
+The Rcpp is faster than R in both SMO and SGD.
+
+### Comparisons
+
+we compare the running time with repeated executions (`nbSimus` times)
+
+```{r}
+nbSimus <- 10
+time1 <- 0; time2 <- 0; time3 <- 0; time4 <- 0
+
+for(i in 1:nbSimus){time1 <- time1 + one.simu(n, num_features = 2, func = "svm_smo")}
+for(i in 1:nbSimus){time2 <- time2 + one.simu(n, num_features = 2, func = "svm_sgd")}
+for(i in 1:nbSimus){time3 <- time3 + one.simu(n, num_features = 2, func = "svm_smo_Rcpp")}
+for(i in 1:nbSimus){time4 <- time4 + one.simu(n, num_features = 2, func = "svm_sgd_Rcpp")}
+```
+
+
+```{r}
+#gain R -> Rcpp
+time1/time3
+time2/time4
+```
+Rcpp is faster than R for our 2 algorithms.
+
+```{r}
+#gain smo -> sgd
+time1/time2
+time3/time4
+```
+
+With the data length of `1000` and 2 features, SGD runs faster than SMO.
+
+```{r}
+#max gain
+time1/time4
+```
+The gain between the slow SMO R algorithm and the faster SGD Rcpp algorithm is of order 200
+
+## Microblenchmark
+
+We compare `svm_smo_Rcpp` with `svm_sgd_Rcpp` for data lengths `n = 1000` and with only 2 features.
+
+```{r}
+n <- 1000
+res <- microbenchmark(one.simu(n, num_features = 2, func = "svm_smo_Rcpp"), one.simu(n, num_features = 2, func = "svm_sgd_Rcpp"), times = 5)
+autoplot(res)
+res
+```
+
+At this data length `1000` and only 2 features, we have a robust difference in running time between SMO_Rcpp and SGD_Rcpp.
+
+
+<a id="time"></a>
+
+## Time complexity
+
+We run `nbRep = 5` times the `svm_smo_Rcpp` algorithm of each value of the `vector_n` vector of length `nbSimus = 11`. We show the plot of the mean running time with respect to data length.
+
+```{r}
+set.seed(123)
+nbSimus <- 6
+vector_n <- seq(from = 1000, to = 5000, length.out = nbSimus)
+nbRep <- 3
+res_smo <- data.frame(matrix(0, nbSimus, nbRep + 1))
+colnames(res_smo) <- c("n", paste0("Rep",1:nbRep))
+
+j <- 1
+for(i in vector_n)
+{
+  res_smo[j,] <- c(i, replicate(nbRep, one.simu(i, num_features = 2, func = "svm_smo_Rcpp")))  
+  #print(j)
+  j <- j + 1
+}
+
+res.smo <- rowMeans(res_smo[,-1])
+plot(vector_n, res.smo, type = 'b', xlab = "data length", ylab = "mean time in seconds")
+```
+
+```{r}
+fit.smo <- lm(log(res.smo) ~ log(vector_n))
+summary(fit.smo)
+```
+
+```{r}
+plot(log(vector_n), log(res.smo), type = 'b', xlab = "data length", ylab = "mean time in seconds")
+abline(fit.smo, col='red')
+```
+
+$$log(T(n)) = C_1 + C_2*log(n)$$
+we could see that the $log(T(n)) \approx log(n^{C_2})$ which is the similar to the best time complexity $\Omega(n^{2})$ of the SMO algorithm. It is reasonable because we are trying the SMO algorithm on the linearly separate data sets with only 2 features and m = max_passes = 1 (which nearly the best case).  
+
+Same strategy but with the `svm_sgd_Rcpp` algorithm.
+
+```{r}
+set.seed(123)
+nbSimus <- 11
+vector_n <- seq(from = 1000, to = 5000, length.out = nbSimus)
+nbRep <- 5
+res_sgd <- data.frame(matrix(0, nbSimus, nbRep + 1))
+colnames(res_sgd) <- c("n", paste0("Rep",1:nbRep))
+
+j <- 1
+for(i in vector_n)
+{
+  res_sgd[j,] <- c(i, replicate(nbRep, one.simu(i, num_features = 2, func = "svm_sgd_Rcpp"),))  
+  #print(j)
+  j <- j + 1
+}
+
+res.sgd <- rowMeans(res_sgd[,-1])
+plot(vector_n, res.sgd, type = 'b', xlab = "data length", ylab = "mean time in seconds")
+```
+
+```{r}
+fit.sgd <- lm(log(res.sgd) ~ log(vector_n))
+summary(fit.sgd)
+```
+
+$$log(T(n)) = C_1 + C_2log(n)$$
+
+we could see that the $log(T(n)) \approx log(n^{C_2})$ which is the similar to the best time complexity $\Omega(n)$ of the SGD algorithm. It is reasonable because we are trying the SGD algorithm on the linearly separate data sets with only 2 features (which nearly the best case).  
+
+
+```{r}
+plot(log(vector_n), log(res.sgd), type = 'b', xlab = "data length", ylab = "mean time in seconds")
+abline(fit.sgd, col='red')
+```
+
